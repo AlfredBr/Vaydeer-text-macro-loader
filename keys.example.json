@@ -1,0 +1,11 @@
+[
+  { "key": 1, "name": "Build", "text": "make", "enter": true },
+  { "key": 2, "name": "Greeting", "text": "Hello!", "enter": false },
+  { "key": 3, "name": "Status", "text": "git status", "enter": true },
+  { "key": 4, "name": "-4-", "text": "4", "enter": false },
+  { "key": 5, "name": "startup", "text": "start shell:startup", "enter": true },
+  { "key": 6, "name": "-6-", "text": "6", "enter": false },
+  { "key": 7, "name": "-7-", "text": "77777777777", "enter": false },
+  { "key": 8, "name": "-8-", "text": "8", "enter": false },
+  { "key": 9, "name": "-9-", "text": "9", "enter": false }
+]

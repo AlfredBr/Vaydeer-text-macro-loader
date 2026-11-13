@@ -1,0 +1,6 @@
+.archive/
+backups/
+*.log
+bin/
+obj/
+.dotnet/
