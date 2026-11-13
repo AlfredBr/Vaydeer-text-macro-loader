@@ -1,15 +1,38 @@
 using Vaydeer;
 
 // Explicit opt-in: a round trip temporarily installs a harmless text-only macro.
-if (args is not ["--write-unchanged"] && args is not ["--round-trip"])
+if (args is not ["--write-unchanged"] && args is not ["--round-trip"] && args is not ["--label-limit"])
 {
-    Console.Error.WriteLine("Use --write-unchanged or --round-trip (temporarily loads text, then restores the original layer).");
+    Console.Error.WriteLine("Use --write-unchanged, --round-trip, or --label-limit (probes label lengths, then restores the original layer).");
     return 2;
 }
+FactorySoftware.EnsureStopped();
 using var device = WindowsHid.Connect();
 var keypad = new Protocol(device);
 var before = keypad.Backup();
 Console.WriteLine("Backup: " + Vaydeer.Program.SaveBackup(before));
+if (args[0] == "--label-limit")
+{
+    try
+    {
+        foreach (int length in new[] { 16, 17, 18, 19 })
+        {
+            var originalKey = before.Layers[0].Keys[2];
+            var key = originalKey with { Header = [.. originalKey.Header.AsSpan(0, 4), .. System.Text.Encoding.BigEndianUnicode.GetBytes(new string('L', length))] };
+            var keys = before.Layers[0].Keys.Select(old => old.Key == key.Key ? key : old).ToArray();
+            keypad.WriteLayer(before.Layers[0] with { Keys = keys }, before.DeviceInfo[9]);
+            var actual = keypad.ReadKey(0, 2);
+            Console.WriteLine($"Label {length}: received {(actual.Header.Length - 4) / 2} UTF-16 units; data matches: {actual.Data.SequenceEqual(originalKey.Data)}.");
+        }
+    }
+    finally
+    {
+        keypad.WriteLayer(before.Layers[0], before.DeviceInfo[9]);
+        keypad.VerifyLayer(0, before.Layers[0].Keys);
+        Console.WriteLine("Original first layer restored and verified.");
+    }
+    return 0;
+}
 var original = before.Layers[0].Keys.First(key => key.Header[1] == 5 && key.Header[2] == 0);
 var encoded = Configuration.Compile(new KeyConfig
 {

@@ -2,6 +2,8 @@ using System.Text.Json;
 
 namespace Vaydeer;
 
+internal record LoadResult(int Count, string BackupPath);
+
 internal static class Program
 {
     private const string Help = """
@@ -16,7 +18,10 @@ internal static class Program
         vaydeer self-test            Run offline tests
 
         JSON: [{"key":1,"name":"Build","text":"make","enter":true}]
-        Keys: 1–9, left to right, top to bottom. enter defaults to false.
+        Optional timing: "delayMs":20, "enterDelayMs":100 (0–65535 milliseconds).
+        Mixed actions: use "steps":[{"press":"Ctrl+F"},{"text":"find me"},{"press":"Enter"}]
+        instead of text/enter/enterDelayMs. Steps: text, press, or delayMs. F1–F12 supported.
+        Keys: 1–9, left to right, top to bottom. Names: 1–16 characters. enter defaults to false.
         Only listed keys on layer 1 change; other keys and layers are preserved.
         Text uses the current Windows keyboard layout. Close other keypad editors.
         """;
@@ -32,10 +37,17 @@ internal static class Program
                     var config = Configuration.Read(args[1]);
                     var map = Configuration.WindowsLayoutMapper();
                     KeyRecord[] compiled = config.Select(key => Configuration.Compile(key, map)).ToArray();
-                    foreach (var key in config) Console.WriteLine($"Key {key.Key}: {key.Name} ({key.Text.Length} characters, Enter: {key.Enter})");
-                    if (args[0] == "validate") { Console.WriteLine("Valid. No USB access or configuration changes."); return 0; }
+                    if (args[0] == "validate")
+                    {
+                        foreach (var key in config) Console.WriteLine(key.Steps is not null
+                            ? $"Key {key.Key}: {key.Name} ({key.Steps.Length} steps, {key.CharacterCount} text characters, gap: {key.DelayMs ?? 5} ms)"
+                            : $"Key {key.Key}: {key.Name} ({key.CharacterCount} characters, Enter: {key.Enter}, gap: {key.DelayMs ?? 5} ms)");
+                        Console.WriteLine("Valid. No USB access or configuration changes.");
+                        return 0;
+                    }
                     FactorySoftware.EnsureStopped();
-                    using (var device = WindowsHid.Connect()) Apply(new Protocol(device), compiled);
+                    LoadOutput.Plan(config, args[1]);
+                    using (var device = WindowsHid.Connect()) LoadOutput.Run(new Protocol(device), compiled);
                     return 0;
                 case "info" when args.Length == 1:
                     using (var device = WindowsHid.Connect())
@@ -82,7 +94,8 @@ internal static class Program
                                      or ArgumentException or InvalidOperationException or TimeoutException
                                      or System.ComponentModel.Win32Exception or PlatformNotSupportedException)
         {
-            Console.Error.WriteLine($"Error: {error.Message}");
+            if (args[0] == "load") LoadOutput.Error(error.Message);
+            else Console.Error.WriteLine($"Error: {error.Message}");
             return 1;
         }
     }
@@ -111,7 +124,7 @@ internal static class Program
         var numbers = new HashSet<int>();
         foreach (var key in layers[0].Keys)
         {
-            if (key is null || key.Key is < 1 or > 9 || !numbers.Add(key.Key) || key.Header is not { Length: >= 4 and <= 52 }
+            if (key is null || key.Key is < 1 or > 9 || !numbers.Add(key.Key) || key.Header is not { Length: >= 4 and <= 36 }
                 || key.Header[0] != 255 || (key.Header.Length - 4) % 2 != 0 || key.Data is null || key.Data.Length > 15360)
                 throw new InvalidDataException("Snapshot contains an invalid key record.");
             if (key.Header[1] > 6 || (key.Header[1] == 5 && key.Header[2] == 3))
@@ -120,11 +133,19 @@ internal static class Program
         return layers[0].Keys;
     }
 
-    internal static void Apply(Protocol keypad, KeyRecord[] requested)
+    internal static LoadResult Apply(Protocol keypad, KeyRecord[] requested, Action<string>? progress = null, bool quiet = false)
     {
+        void Report(string phase)
+        {
+            // Presentation must never interrupt a write or its recovery.
+            try { progress?.Invoke(phase); }
+            catch (Exception) { }
+        }
+        Report("Reading existing configuration…");
         var before = keypad.Backup();
+        Report("Saving backup…");
         string backup = SaveBackup(before);
-        Console.WriteLine($"Backup: {backup}");
+        if (!quiet) Console.WriteLine($"Backup: {backup}");
         var info = new DeviceInfo(before.DeviceInfo);
         var original = before.Layers[0].Keys;
         var changed = requested.Where(key => !Protocol.Equal(key, original.Single(old => old.Key == key.Key))).ToArray();
@@ -135,6 +156,7 @@ internal static class Program
                 throw new InvalidOperationException($"Key {old.Key} has a multi-phase macro; use the factory software to replace it first.");
         }
         // Abort before writing if another editor modified any layer-1 key during backup.
+        Report("Checking for concurrent changes…");
         keypad.VerifyLayer(0, original);
         bool attempted = false;
         bool activating = false;
@@ -144,32 +166,40 @@ internal static class Program
             if (changed.Length != 0)
             {
                 attempted = true;
+                Report("Writing layer 1…");
                 keypad.WriteLayer(before.Layers[0] with { Keys = expected }, info.LayerCount);
             }
+            Report("Verifying stored key records…");
             keypad.VerifyLayer(0, expected);
             for (int layer = 1; layer < before.Layers.Length; layer++) keypad.VerifyLayer(layer, before.Layers[layer].Keys);
             activating = true;
+            Report("Activating layer 1…");
             keypad.Activate(0);
             if (keypad.Info().ActiveLayer != 0) throw new IOException("Layer 1 could not be activated.");
-            Console.WriteLine($"Loaded {requested.Length} key(s); stored settings verified. Layer 1 is active. You can close this CLI.");
-            Console.WriteLine("Keep the factory software exited while using these hardware macros.");
+            if (!quiet)
+            {
+                Console.WriteLine($"Loaded {requested.Length} key(s); stored settings verified. Layer 1 is active. You can close this CLI.");
+                Console.WriteLine("Keep the factory software exited while using these hardware macros.");
+            }
+            return new(requested.Length, backup);
         }
         catch (Exception error)
         {
-            Console.Error.WriteLine($"Load failed: {error.Message}");
+            Report("Restoring previous assignments…");
+            string recovery;
             try
             {
                 if (attempted) keypad.WriteLayer(before.Layers[0], info.LayerCount);
                 if (activating) keypad.Activate(info.ActiveLayer);
                 keypad.VerifyLayer(0, original);
-                Console.Error.WriteLine("Previous layer-1 assignments restored and verified.");
+                recovery = "Previous layer-1 assignments restored and verified.";
             }
             catch (Exception rollback)
             {
-                Console.Error.WriteLine($"Automatic recovery failed: {rollback.Message}");
-                Console.Error.WriteLine($"Reconnect the keypad and use: vaydeer restore \"{backup}\"");
+                recovery = $"Automatic recovery failed: {rollback.Message}\nReconnect the keypad and use: vaydeer restore \"{backup}\"";
             }
-            throw;
+            // Surface recovery and backup in one error after the live display has stopped.
+            throw new IOException($"{error.Message}\n{recovery}\nBackup: {backup}", error);
         }
     }
 }

@@ -31,6 +31,7 @@ internal static class Dump
             bool enter = text.EndsWith('\n') || text.EndsWith('\r');
             if (enter) text = text.EndsWith("\r\n", StringComparison.Ordinal) ? text[..^2] : text[..^1];
             var config = new KeyConfig { Key = key.Key, Name = name, Text = text, Enter = enter };
+            if (key.Header[1] == 5) config = DecodeTiming(key.Data, config, map);
             // Only label an entry as loadable text if the loader really accepts it.
             Configuration.Parse(JsonSerializer.Serialize(new[] { config }, Configuration.Json));
             Configuration.Compile(config, map);
@@ -38,6 +39,26 @@ internal static class Dump
         }
         catch (Exception error) when (error is InvalidDataException or ArgumentException or JsonException)
         {
+            try
+            {
+                KeyConfig? steps = null;
+                if (key.Header[1] == 5 && key.Header[2] == 0 && key.Header[3] == 0)
+                    steps = StepMacros.Decode(key, name);
+                else if (key.Header[1] is 0 or 1)
+                {
+                    byte[] modifiers = key.Data.Where(NamedKeys.IsModifier).ToArray();
+                    byte[] main = key.Data.Where(code => !NamedKeys.IsModifier(code)).ToArray();
+                    if (main.Length == 1 && modifiers.Distinct().Count() == modifiers.Length)
+                        steps = new KeyConfig { Key = key.Key, Name = name, Steps = [new MacroStep { Press = NamedKeys.Format(modifiers, main[0]) }] };
+                }
+                if (steps is not null)
+                {
+                    Configuration.Parse(JsonSerializer.Serialize(new[] { steps }, Configuration.Json));
+                    var compiled = Configuration.Compile(steps, map);
+                    if (key.Header[1] != 5 || compiled.Data.SequenceEqual(key.Data)) return steps;
+                }
+            }
+            catch (Exception stepError) when (stepError is InvalidDataException or ArgumentException or JsonException) { }
             string type = key.Header[1] switch
             {
                 0 => "key", 1 => "shortcut", 2 => "text", 3 => "launch", 4 => "mouse",
@@ -46,6 +67,31 @@ internal static class Dump
             return new RawDumpKey(key.Key, name, type, error.Message,
                 System.Convert.ToHexString(key.Header), System.Convert.ToHexString(key.Data));
         }
+    }
+
+    private static KeyConfig DecodeTiming(byte[] data, KeyConfig config, Func<char, int> map)
+    {
+        int Interval(int offset) => data[offset] | data[offset + 1] << 8;
+        int enterOffset = config.Enter && config.Text.Length != 0 ? data.Length - 10 : -1;
+        int gap = 5;
+        // Ignore the final settling interval and the separate pre-Enter gap.
+        for (int offset = 2; offset < data.Length - 4; offset += 4)
+        {
+            if (offset != enterOffset && Interval(offset) != 5)
+            {
+                gap = Interval(offset);
+                break;
+            }
+        }
+        int enterGap = enterOffset >= 0 ? Interval(enterOffset) : gap;
+        config = config with
+        {
+            DelayMs = gap == 5 ? null : gap,
+            EnterDelayMs = enterGap == gap ? null : enterGap
+        };
+        if (!Configuration.Compile(config, map).Data.SequenceEqual(data))
+            throw new InvalidDataException("Macro timing or event structure cannot be represented by delayMs and enterDelayMs.");
+        return config;
     }
 
     private static string DecodeKeys(byte[] codes, Func<byte, int, char?> decode)

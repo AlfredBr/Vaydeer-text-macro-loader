@@ -4,3 +4,4 @@ backups/
 bin/
 obj/
 .dotnet/
+.packages/

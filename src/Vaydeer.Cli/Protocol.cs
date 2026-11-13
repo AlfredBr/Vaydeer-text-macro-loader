@@ -112,7 +112,13 @@ internal sealed class Protocol(IReports reports)
     public void VerifyLayer(int layer, KeyRecord[] expected)
     {
         foreach (var key in expected)
-            if (!Equal(key, ReadKey(layer, key.Key - 1)))
-                throw new IOException($"Read-back mismatch on layer {layer + 1}, key {key.Key}.");
+        {
+            var actual = ReadKey(layer, key.Key - 1);
+            if (!Equal(key, actual))
+                throw new IOException($"Read-back mismatch on layer {layer + 1}, key {key.Key}. " +
+                    $"Header: expected {key.Header.Length} bytes, received {actual.Header.Length}; " +
+                    $"data: expected {key.Data.Length} bytes, received {actual.Data.Length}. " +
+                    $"Header matches: {key.Header.SequenceEqual(actual.Header)}; data matches: {key.Data.SequenceEqual(actual.Data)}.");
+        }
     }
 }

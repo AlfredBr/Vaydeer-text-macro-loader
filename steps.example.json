@@ -1,0 +1,24 @@
+[
+  {
+    "key": 1,
+    "name": "Search and next",
+    "steps": [
+      { "press": "Ctrl+F" },
+      { "text": "key" },
+      { "press": "Enter" },
+      { "delayMs": 100 },
+      { "press": "F3" }
+    ]
+  },
+  {
+    "key": 2,
+    "name": "Save as",
+    "steps": [ { "press": "Ctrl+Shift+S" } ]
+  },
+  {
+    "key": 3,
+    "name": "Plain text",
+    "text": "Hello!",
+    "enter": false
+  }
+]
